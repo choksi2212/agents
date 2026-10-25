@@ -147,7 +147,9 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * The legacy-counter seed against segments retired before it: the seed
-   * must add to them, not replace them, and must be idempotent.
+   * folds the counter in by max against the row's own durable total — the
+   * marker never reads below the counter or the segments it already
+   * counts — and is idempotent.
    */
   async probeSeedOrdering(): Promise<Record<string, number>> {
     await this.lifecycle.start();
@@ -166,6 +168,35 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     marker.seededLower = adapter.progressMarker();
     adapter.creditProgress();
     marker.credited = adapter.progressMarker();
+    return marker;
+  }
+
+  /**
+   * The rollback-insurance mirror loop hosts actually run: the durable total
+   * is mirrored to the pre-derivation KV key on every retire, and each new
+   * isolate seeds that mirrored value back into a rebuilt adapter on the same
+   * capability. The seed must not fold segments the row already counts in
+   * `retired` into `legacy` again — the marker must read exactly what was
+   * mirrored, not grow per wake.
+   */
+  async probeMirrorReseed(): Promise<Record<string, number>> {
+    await this.lifecycle.start();
+    const marker: Record<string, number> = {};
+    const adapter = this.#adapter();
+    const first = adapter.start("mirror-req-1");
+    for (let i = 0; i < 10; i++) adapter.storeChunk(first, this.#body(i, 60));
+    adapter.finish(first);
+    adapter.cutover(first, () => {});
+    marker.retired = adapter.progressMarker();
+    const mirrored = this.progressReports.at(-1);
+    if (mirrored === undefined) throw new Error("no progress report");
+    const next = this.#adapter();
+    next.seedProgress(mirrored);
+    marker.reseeded = next.progressMarker();
+    next.seedProgress(marker.reseeded);
+    marker.reseededAgain = next.progressMarker();
+    next.seedProgress(marker.reseeded + 100);
+    marker.counterPastDerived = next.progressMarker();
     return marker;
   }
 

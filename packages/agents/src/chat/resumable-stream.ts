@@ -369,10 +369,19 @@ export class ResumableStream {
    * Carry the pre-derivation KV counter forward: the marker must not read
    * lower after the upgrade than the high-water mark an in-flight incident
    * already recorded, or a progressing turn would look stuck until the log
-   * caught up. The counter is never written again, so its value is a
-   * constant this folds into its own column by max — idempotent across
-   * isolates, and never touching segments retired before the seed landed.
-   * A no-op for zero, so a fresh object never writes.
+   * caught up. Hosts mirror the durable total back into the same key as
+   * rollback insurance (one put per retire, never per chunk), so the value
+   * seeded here is not a constant: once anything has retired, it is
+   * `retired + legacy` — the row's own durable total. Folding that into
+   * `legacy` by max alone re-adds `retired` on every isolate, compounding
+   * without bound until a long conversation's next interruption reads as
+   * more than `maxRecoveryWork` of fresh work and is sealed
+   * `work_budget_exceeded`. Raise `legacy` only to `excluded.legacy -
+   * retired` instead: the row keeps the invariant `retired + legacy >=
+   * counter` — a marker never reads below the counter — while reseeding the
+   * mirrored total is a no-op. Rows already inflated by the pre-fix fold
+   * keep their constant offset: budgets read differences, so no evaluation
+   * is affected. A no-op for zero, so a fresh object never writes.
    *
    * The counter already credited a stream that was in flight at the
    * upgrade, and that stream's live segments count again here, so the
@@ -386,7 +395,7 @@ export class ResumableStream {
       INSERT INTO cf_agents_chat_progress (key, retired, legacy)
       VALUES ('chat', 0, ${legacyTotal})
       ON CONFLICT(key) DO UPDATE
-        SET legacy = MAX(legacy, excluded.legacy)
+        SET legacy = MAX(legacy, excluded.legacy - retired)
     `;
   }
 

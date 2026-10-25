@@ -38,11 +38,11 @@ describe("ResumableStream.progressMarker", () => {
       // Clearing history retires the live stream's segment; nothing is lost.
       expect(marker.cleared).toBe(6);
 
-      // Seeding folds the legacy counter into its own column by max, beside
-      // the retired segments: a later, larger seed replaces a smaller one
-      // and neither touches what the log already counted.
-      expect(marker.seededLow).toBe(8);
-      expect(marker.seededHigh).toBe(52);
+      // Seeding folds the counter in by max against the row's own durable
+      // total: a lower counter changes nothing, a counter past the derived
+      // total raises the marker to itself.
+      expect(marker.seededLow).toBe(6);
+      expect(marker.seededHigh).toBe(46);
 
       // No per-chunk write exists: 36 chunks were stored along the way, and
       // the whole sequence — stream opens, block writes, settles, deletions
@@ -83,18 +83,39 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
-  it("seeds the legacy counter beside segments retired before it, idempotently", async () => {
+  it("does not re-add the retired total when a new isolate seeds the mirrored durable marker", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      const marker = await instance.probeMirrorReseed();
+      // The cutover retired a segment and the host mirrored the durable
+      // total to the pre-derivation KV key; a new isolate seeds that value.
+      expect(marker.retired).toBeGreaterThan(0);
+      // Seeding the mirrored total is a no-op: the row already counts those
+      // segments in `retired`, and folding them into `legacy` again would
+      // grow the marker by the whole retired history on every wake, sealing
+      // long conversations with work_budget_exceeded.
+      expect(marker.reseeded).toBe(marker.retired);
+      expect(marker.reseededAgain).toBe(marker.retired);
+      // Rollback insurance is intact: a counter past the derived marker
+      // still raises the marker to the counter, never lower.
+      expect(marker.counterPastDerived).toBe(marker.reseeded + 100);
+    });
+  });
+
+  it("seeds the legacy counter against segments retired before it, idempotently", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
       const marker = await instance.probeSeedOrdering();
       // Two segments were retired by a cutover before any seed landed.
       expect(marker.retiredBeforeSeed).toBe(2);
-      // The seed adds the counter beside them; it does not replace them.
-      expect(marker.seeded).toBe(42);
-      // Another isolate seeding the same constant changes nothing.
-      expect(marker.seededAgain).toBe(42);
-      expect(marker.seededLower).toBe(42);
-      expect(marker.credited).toBe(43);
+      // The seed folds the counter in by max against the row's own durable
+      // total: the row already counts what it produced, so the marker
+      // reads the counter, never lower and never the sum of both.
+      expect(marker.seeded).toBe(40);
+      // Another isolate seeding the same counter changes nothing.
+      expect(marker.seededAgain).toBe(40);
+      expect(marker.seededLower).toBe(40);
+      expect(marker.credited).toBe(41);
     });
   });
 });
